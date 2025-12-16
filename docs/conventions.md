@@ -22,7 +22,7 @@ dev, prod, qat, stg  →  Wrong (prod before qat)
 
 | Prefix | Environment | Account  | Purpose                       |
 | ------ | ----------- | -------- | ----------------------------- |
-| 10     | dev         | Non-Prod | Development, sandbox          |
+| 10     | dev         | Non-Prod | Development                   |
 | 20     | qat         | Non-Prod | Testing                       |
 | 40     | stg         | Prod     | Staging                       |
 | 70     | prod        | Prod     | Production                    |
