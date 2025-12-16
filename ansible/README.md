@@ -19,7 +19,7 @@ ansible/
 │   ├── 20-qat/
 │   ├── 40-stg/
 │   ├── 70-prod/
-│   └── 100-dr/
+│   └── 90-dr/
 ├── group_vars/
 ├── roles/
 │   ├── 10-common/
@@ -57,7 +57,7 @@ Use numbered prefixes for correct sorting:
 | `20-qat/`  | QA Testing  | Non-Prod |
 | `40-stg/`  | Staging     | Prod     |
 | `70-prod/` | Production  | Prod     |
-| `100-dr/`  | DR          | Prod     |
+| `90-dr/`   | DR          | Prod     |
 
 ## Role Naming
 

@@ -28,7 +28,7 @@ flowchart LR
         A[10-dev] --> B[20-qat]
     end
     subgraph Prod[Prod Account]
-        C[40-stg] --> D[70-prod] --> E[100-dr]
+        C[40-stg] --> D[70-prod] --> E[90-dr]
     end
     B --> C
 ```
@@ -43,7 +43,7 @@ flowchart LR
 | 20-qat   | Non-Prod | blocked | manual | no          |
 | 40-stg   | Prod     | blocked | manual | no          |
 | 70-prod  | Prod     | blocked | manual | **yes**     |
-| 100-dr   | Prod     | blocked | manual | no          |
+| 90-dr    | Prod     | blocked | manual | no          |
 
 ## Path Filtering
 

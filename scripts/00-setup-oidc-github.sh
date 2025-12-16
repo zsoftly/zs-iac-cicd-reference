@@ -96,7 +96,8 @@ create_trust_policy() {
     if [ "$GITHUB_REPO" == "*" ]; then
         SUBJECT="repo:${GITHUB_ORG}/*:*"
     else
-        SUBJECT="repo:${GITHUB_ORG}/${GITHUB_REPO}:ref:refs/heads/main"
+        # Allow both main branch and pull_request events for PR validation
+        SUBJECT="repo:${GITHUB_ORG}/${GITHUB_REPO}:*"
     fi
 
     TRUST_POLICY=$(cat <<EOF

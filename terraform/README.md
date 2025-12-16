@@ -52,4 +52,4 @@ Use numbered prefixes for correct sorting:
 | `20-qat.tfvars`  | QA Testing  | Non-Prod |
 | `40-stg.tfvars`  | Staging     | Prod     |
 | `70-prod.tfvars` | Production  | Prod     |
-| `100-dr.tfvars`  | DR          | Prod     |
+| `90-dr.tfvars`   | DR          | Prod     |

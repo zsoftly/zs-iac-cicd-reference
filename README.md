@@ -8,7 +8,7 @@ Architecture patterns for IaC (Terraform, Ansible, CloudFormation) pipelines on 
 ┌─────────────────────────────────┐    ┌─────────────────────────────────┐
 │         NON-PROD ACCOUNT        │    │          PROD ACCOUNT           │
 │                                 │    │                                 │
-│  10-dev   20-qat   (sandbox)    │    │  40-stg   70-prod   100-dr      │
+│  10-dev   20-qat   (sandbox)    │    │  40-stg   70-prod   90-dr       │
 │                                 │    │                                 │
 │  ca-central-1                   │    │  ca-central-1 / ca-west-1 (DR)  │
 └─────────────────────────────────┘    └─────────────────────────────────┘
@@ -44,7 +44,7 @@ See [docs/pipeline-rules.md](docs/pipeline-rules.md)
 ```
 NON-PROD ACCOUNT          PROD ACCOUNT
 ────────────────          ────────────
-10-dev → 20-qat    →    40-stg → 70-prod → 100-dr
+10-dev → 20-qat    →    40-stg → 70-prod → 90-dr
                                     ↑
                               requires CR
 ```
@@ -61,7 +61,8 @@ Use AI with your org context + these docs:
 Generate a [GitHub/GitLab/Jenkins] pipeline for Terraform:
 - Follow docs/pipeline-rules.md for triggers
 - Follow docs/authentication.md for role chaining
-- Two accounts: non-prod (dev, qat), prod (stg, prod, dr)
+- 2 AWS accounts: non-prod, prod
+- 5 environments: dev, qat (non-prod) | stg, prod, dr (prod account)
 - Regions: ca-central-1, ca-west-1 (DR)
 ```
 

@@ -15,18 +15,13 @@ Parameters:
     AllowedPattern: '^[a-zA-Z0-9-]+$'
     ConstraintDescription: Must be a valid GitHub organization name
 
-  AllowedRepositories:
-    Type: CommaDelimitedList
-    Description: |
-      Comma-separated list of allowed repositories.
-      Use * for all repos in the org.
-      Examples: my-repo, infra-*, *
-    Default: '*'
-
   ThumbprintList:
     Type: CommaDelimitedList
     Description: GitHub OIDC thumbprints (rarely changes)
     Default: '6938fd4d98bab03faadb97b34396831e3780aea1,1c58a3a8518e8759bf075b76b750d4f2df264fcd'
+
+# Note: Repository restrictions are enforced in IAM role trust policies (10-iam-cicd-roles.yaml),
+# not in the OIDC provider itself.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -35,13 +30,10 @@ Metadata:
           default: GitHub Configuration
         Parameters:
           - GitHubOrganization
-          - AllowedRepositories
           - ThumbprintList
     ParameterLabels:
       GitHubOrganization:
         default: GitHub Organization
-      AllowedRepositories:
-        default: Allowed Repositories
 
 Resources:
   # ==========================================================================

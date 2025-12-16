@@ -48,22 +48,26 @@ flowchart LR
 
 ### GitHub Actions
 
-```
-Secrets (per environment):
-- OIDC_ROLE_ARN_NONPROD / OIDC_ROLE_ARN_PROD
-- ADMIN_ROLE_ARN_NONPROD / ADMIN_ROLE_ARN_PROD
+```yaml
+# Role ARNs are not sensitive - hardcode in workflow or use variables
+env:
+  OIDC_ROLE_ARN_NONPROD: arn:aws:iam::111111111111:role/cicd-oidc-role
+  OIDC_ROLE_ARN_PROD: arn:aws:iam::222222222222:role/cicd-oidc-role
+  ADMIN_ROLE_ARN_NONPROD: arn:aws:iam::111111111111:role/cicd-admin-role
+  ADMIN_ROLE_ARN_PROD: arn:aws:iam::222222222222:role/cicd-admin-role
 
-Workflow permissions:
-- id-token: write
-- contents: read
+permissions:
+  id-token: write
+  contents: read
 ```
 
 ### GitLab CI
 
-```
-Variables (per environment):
-- OIDC_ROLE_ARN (protected, environment-scoped)
-- ADMIN_ROLE_ARN (protected, environment-scoped)
+```yaml
+# Variables (per environment) - not secrets, role ARNs are public
+variables:
+  OIDC_ROLE_ARN: arn:aws:iam::${AWS_ACCOUNT_ID}:role/cicd-oidc-role
+  ADMIN_ROLE_ARN: arn:aws:iam::${AWS_ACCOUNT_ID}:role/cicd-admin-role
 ```
 
 ## Cross-Account Flow
