@@ -1,0 +1,16 @@
+---
+# security/defaults/main.yml - Default security variables
+
+# Fail2ban configuration
+install_fail2ban: true
+fail2ban_bantime: "1h"
+fail2ban_findtime: "10m"
+fail2ban_maxretry: 5
+
+# Services to disable (override per environment)
+disabled_services: []
+# Example:
+# disabled_services:
+#   - cups
+#   - avahi-daemon
+#   - bluetooth

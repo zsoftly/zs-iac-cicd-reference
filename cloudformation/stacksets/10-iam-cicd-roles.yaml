@@ -1,0 +1,400 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  CI/CD IAM Roles with Role Chaining - Foundation StackSet
+
+  Deploy ONCE via StackSet from management account.
+
+  Architecture:
+  1. OIDC Role - Minimal permissions, just enough to assume admin role
+  2. Admin Role - Full permissions for infrastructure operations
+
+  Role Chaining Flow:
+    GitHub Actions -> OIDC Role -> Admin Role -> Deploy Infrastructure
+    EC2 Runner    -> Instance Profile -> Admin Role -> Deploy Infrastructure
+
+  This pattern:
+  - Separates authentication from authorization
+  - Admin role can be used by multiple auth methods (OIDC, EC2, etc.)
+  - Centralized permission management in admin role
+  - OIDC role is lightweight and rarely changes
+
+Parameters:
+  GitHubOrganization:
+    Type: String
+    Description: GitHub organization name
+    AllowedPattern: '^[a-zA-Z0-9-]+$'
+
+  AllowedRepositories:
+    Type: String
+    Description: |
+      Repository pattern for trust policy.
+      Examples: my-repo, infra-*, * (all repos)
+    Default: '*'
+
+  AllowedBranches:
+    Type: String
+    Description: |
+      Branch pattern for production deployments.
+      Examples: main, release-*, refs/heads/main
+    Default: 'main'
+
+  ToolingAccountId:
+    Type: String
+    Description: |
+      AWS Account ID of tooling/management account.
+      Allows cross-account role assumption from EC2 runners.
+    Default: ''
+    AllowedPattern: '^(\d{12})?$'
+
+Conditions:
+  HasToolingAccount: !Not [!Equals [!Ref ToolingAccountId, '']]
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: GitHub Configuration
+        Parameters:
+          - GitHubOrganization
+          - AllowedRepositories
+          - AllowedBranches
+      - Label:
+          default: Cross-Account Access
+        Parameters:
+          - ToolingAccountId
+
+Resources:
+  # ==========================================================================
+  # OIDC ROLE - Lightweight, just for assuming admin role
+  # ==========================================================================
+  CICDOIDCRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cicd-oidc-role
+      Description: |
+        OIDC authentication role. Minimal permissions.
+        Only allowed to assume cicd-admin-role in this account.
+      MaxSessionDuration: 3600  # 1 hour
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # GitHub Actions OIDC - Any branch for this lightweight role
+          - Sid: GitHubActionsOIDC
+            Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                'token.actions.githubusercontent.com:sub': !Sub 'repo:${GitHubOrganization}/${AllowedRepositories}:*'
+      Policies:
+        - PolicyName: AssumeAdminRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Only permission: assume the admin role
+              - Sid: AssumeAdminRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt CICDAdminRole.Arn
+      Tags:
+        - Key: Name
+          Value: cicd-oidc-role
+        - Key: Purpose
+          Value: oidc-authentication
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+  # ==========================================================================
+  # ADMIN ROLE - Full permissions for CI/CD operations
+  # ==========================================================================
+  CICDAdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cicd-admin-role
+      Description: |
+        Admin role for CI/CD operations (Terraform, Ansible).
+        Assumed by cicd-oidc-role or EC2 instance profiles.
+        Has full permissions for infrastructure management.
+      MaxSessionDuration: 7200  # 2 hours
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allow OIDC role to assume this role
+          - Sid: AssumeFromOIDCRole
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt CICDOIDCRole.Arn
+            Action: sts:AssumeRole
+          # Allow EC2 runner role from tooling account
+          - !If
+            - HasToolingAccount
+            - Sid: AssumeFromToolingAccount
+              Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:aws:iam::${ToolingAccountId}:role/cicd-runner-role'
+              Action: sts:AssumeRole
+            - !Ref AWS::NoValue
+          # Allow same-account EC2 runners
+          - Sid: AssumeFromEC2Runner
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/cicd-runner-role'
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref CICDAdminPolicy
+      Tags:
+        - Key: Name
+          Value: cicd-admin-role
+        - Key: Purpose
+          Value: infrastructure-admin
+        - Key: AccessLevel
+          Value: admin
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+  CICDAdminPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: cicd-admin-policy
+      Description: Full infrastructure permissions for Terraform and Ansible
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Full EC2 access
+          - Sid: EC2Full
+            Effect: Allow
+            Action: ec2:*
+            Resource: '*'
+          # Full VPC access
+          - Sid: VPCFull
+            Effect: Allow
+            Action:
+              - ec2:CreateVpc
+              - ec2:DeleteVpc
+              - ec2:ModifyVpcAttribute
+              - ec2:CreateSubnet
+              - ec2:DeleteSubnet
+              - ec2:CreateRouteTable
+              - ec2:DeleteRouteTable
+              - ec2:CreateRoute
+              - ec2:DeleteRoute
+              - ec2:AssociateRouteTable
+              - ec2:DisassociateRouteTable
+              - ec2:CreateInternetGateway
+              - ec2:DeleteInternetGateway
+              - ec2:AttachInternetGateway
+              - ec2:DetachInternetGateway
+              - ec2:CreateNatGateway
+              - ec2:DeleteNatGateway
+              - ec2:AllocateAddress
+              - ec2:ReleaseAddress
+              - ec2:CreateSecurityGroup
+              - ec2:DeleteSecurityGroup
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupEgress
+            Resource: '*'
+          # Full IAM access (with guardrails)
+          - Sid: IAMFull
+            Effect: Allow
+            Action: iam:*
+            Resource: '*'
+          # Deny modifying foundation resources
+          - Sid: DenyModifyFoundation
+            Effect: Deny
+            Action:
+              - iam:DeleteRole
+              - iam:DeleteRolePolicy
+              - iam:DetachRolePolicy
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+            Resource:
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/cicd-*'
+            Condition:
+              StringEquals:
+                'iam:ResourceTag/Foundation': 'true'
+          # S3 full access
+          - Sid: S3Full
+            Effect: Allow
+            Action: s3:*
+            Resource: '*'
+          # RDS full access
+          - Sid: RDSFull
+            Effect: Allow
+            Action: rds:*
+            Resource: '*'
+          # EKS full access
+          - Sid: EKSFull
+            Effect: Allow
+            Action: eks:*
+            Resource: '*'
+          # Lambda full access
+          - Sid: LambdaFull
+            Effect: Allow
+            Action: lambda:*
+            Resource: '*'
+          # CloudWatch full access
+          - Sid: CloudWatchFull
+            Effect: Allow
+            Action:
+              - cloudwatch:*
+              - logs:*
+            Resource: '*'
+          # Secrets Manager
+          - Sid: SecretsManagerFull
+            Effect: Allow
+            Action: secretsmanager:*
+            Resource: '*'
+          # SSM (for Ansible)
+          - Sid: SSMFull
+            Effect: Allow
+            Action: ssm:*
+            Resource: '*'
+          # DynamoDB (for state locking)
+          - Sid: DynamoDBFull
+            Effect: Allow
+            Action: dynamodb:*
+            Resource: '*'
+          # Route53
+          - Sid: Route53Full
+            Effect: Allow
+            Action:
+              - route53:*
+              - route53domains:*
+            Resource: '*'
+          # ACM
+          - Sid: ACMFull
+            Effect: Allow
+            Action: acm:*
+            Resource: '*'
+          # ELB
+          - Sid: ELBFull
+            Effect: Allow
+            Action: elasticloadbalancing:*
+            Resource: '*'
+          # Auto Scaling
+          - Sid: AutoScalingFull
+            Effect: Allow
+            Action: autoscaling:*
+            Resource: '*'
+          # SNS/SQS
+          - Sid: MessagingFull
+            Effect: Allow
+            Action:
+              - sns:*
+              - sqs:*
+            Resource: '*'
+          # KMS
+          - Sid: KMSFull
+            Effect: Allow
+            Action: kms:*
+            Resource: '*'
+          # CloudFormation (for reading outputs)
+          - Sid: CloudFormationRead
+            Effect: Allow
+            Action:
+              - cloudformation:Describe*
+              - cloudformation:Get*
+              - cloudformation:List*
+            Resource: '*'
+
+  # ==========================================================================
+  # EC2 RUNNER ROLE - For self-hosted runners
+  # ==========================================================================
+  CICDRunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cicd-runner-role
+      Description: |
+        Instance profile role for self-hosted CI/CD runners.
+        Allows assuming cicd-admin-role for operations.
+      MaxSessionDuration: 7200
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EC2AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AssumeAdminRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Assume admin role in this account
+              - Sid: AssumeAdminRoleLocal
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt CICDAdminRole.Arn
+              # Assume admin role in other accounts (cross-account)
+              - Sid: AssumeAdminRoleCrossAccount
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: 'arn:aws:iam::*:role/cicd-admin-role'
+      Tags:
+        - Key: Name
+          Value: cicd-runner-role
+        - Key: Purpose
+          Value: ec2-runner-profile
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+  CICDRunnerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: cicd-runner-profile
+      Roles:
+        - !Ref CICDRunnerRole
+
+Outputs:
+  OIDCRoleArn:
+    Description: ARN of the OIDC Role (use this in GitHub Actions)
+    Value: !GetAtt CICDOIDCRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-OIDCRoleArn'
+
+  AdminRoleArn:
+    Description: ARN of the Admin Role (assumed by OIDC role)
+    Value: !GetAtt CICDAdminRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AdminRoleArn'
+
+  RunnerRoleArn:
+    Description: ARN of the EC2 Runner Role
+    Value: !GetAtt CICDRunnerRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RunnerRoleArn'
+
+  RunnerInstanceProfileArn:
+    Description: ARN of the EC2 Runner Instance Profile
+    Value: !GetAtt CICDRunnerInstanceProfile.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RunnerInstanceProfileArn'
+
+  RoleChainingExample:
+    Description: Example GitHub Actions configuration
+    Value: !Sub |
+      # GitHub Actions workflow example:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${CICDOIDCRole.Arn}
+          aws-region: ca-central-1
+
+      - name: Assume admin role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${CICDAdminRole.Arn}
+          aws-region: ca-central-1
+          role-chaining: true

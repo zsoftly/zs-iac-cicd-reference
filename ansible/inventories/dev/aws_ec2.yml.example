@@ -1,0 +1,41 @@
+# AWS EC2 Dynamic Inventory Example
+#
+# Rename to aws_ec2.yml to use
+# Requires: amazon.aws collection
+#
+# Usage:
+#   ansible-inventory -i inventories/dev/aws_ec2.yml --graph
+#   ansible-playbook -i inventories/dev/aws_ec2.yml playbooks/site.yml
+
+plugin: amazon.aws.aws_ec2
+
+regions:
+  - us-east-1
+  - us-west-2
+
+# Filter to only include running instances with specific tags
+filters:
+  instance-state-name: running
+  "tag:Environment": dev
+
+# Group instances by tags
+keyed_groups:
+  - key: tags.Role
+    prefix: role
+    separator: "_"
+  - key: tags.Environment
+    prefix: env
+    separator: "_"
+  - key: placement.availability_zone
+    prefix: az
+
+# Set hostname to Name tag or instance ID
+hostnames:
+  - tag:Name
+  - instance-id
+
+# Compose additional variables
+compose:
+  ansible_host: private_ip_address
+  ansible_user: "'ec2-user'"
+  environment: "'dev'"

@@ -1,0 +1,56 @@
+---
+# common/tasks/main.yml - Base system configuration
+#
+# This role handles:
+# - Package updates
+# - Essential packages installation
+# - System configuration
+# - Time synchronization
+
+- name: Update package cache
+  ansible.builtin.package:
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+
+- name: Install essential packages
+  ansible.builtin.package:
+    name: "{{ common_packages }}"
+    state: present
+
+- name: Set timezone
+  community.general.timezone:
+    name: "{{ timezone | default('UTC') }}"
+
+- name: Configure NTP
+  ansible.builtin.service:
+    name: "{{ ntp_service }}"
+    state: started
+    enabled: true
+
+- name: Set system hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname_short }}"
+  when: set_hostname | default(false)
+
+- name: Configure system limits
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/99-custom.conf
+    content: |
+      # Custom limits for {{ environment }}
+      * soft nofile {{ nofile_soft | default(65536) }}
+      * hard nofile {{ nofile_hard | default(65536) }}
+      * soft nproc {{ nproc_soft | default(65536) }}
+      * hard nproc {{ nproc_hard | default(65536) }}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure sysctl parameters
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+  loop: "{{ sysctl_params | dict2items }}"
+  when: sysctl_params is defined

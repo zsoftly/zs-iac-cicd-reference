@@ -1,0 +1,77 @@
+---
+# site.yml - Main Playbook Entry Point
+#
+# This playbook orchestrates all configuration management tasks.
+# It applies roles in the correct order with proper dependency handling.
+#
+# Usage:
+#   # Full run
+#   ansible-playbook playbooks/site.yml -i inventories/dev
+#
+#   # With tags
+#   ansible-playbook playbooks/site.yml -i inventories/dev --tags security
+#
+#   # Dry-run
+#   ansible-playbook playbooks/site.yml -i inventories/dev --check --diff
+#
+# Tags:
+#   - common: Base system configuration
+#   - security: Security hardening
+#   - monitoring: Monitoring agent setup
+#   - all: Run everything (default)
+
+- name: Base System Configuration
+  hosts: all
+  become: true
+  gather_facts: true
+  tags: [common]
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family is defined
+          - environment is defined
+        fail_msg: "Required variables not defined. Check inventory."
+        success_msg: "Variables validated successfully"
+
+    - name: Display target information
+      ansible.builtin.debug:
+        msg: |
+          Target: {{ inventory_hostname }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Environment: {{ environment }}
+
+  roles:
+    - role: 10-common
+      tags: [common, base]
+
+- name: Security Hardening
+  hosts: all
+  become: true
+  gather_facts: false
+  tags: [security]
+
+  roles:
+    - role: 20-security
+      tags: [security, hardening]
+
+- name: Monitoring Setup
+  hosts: all
+  become: true
+  gather_facts: false
+  tags: [monitoring]
+
+  roles:
+    - role: 70-monitoring
+      tags: [monitoring, agents]
+
+  post_tasks:
+    - name: Verify monitoring agent is running
+      ansible.builtin.service:
+        name: "{{ monitoring_agent_service | default('node_exporter') }}"
+        state: started
+      check_mode: true
+      register: monitoring_check
+      failed_when: monitoring_check.changed
+      tags: [monitoring, verify]

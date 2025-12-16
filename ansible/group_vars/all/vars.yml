@@ -1,0 +1,40 @@
+---
+# group_vars/all/vars.yml - Variables for all hosts
+#
+# This file contains non-sensitive variables applicable to all environments.
+# For sensitive data, use vault.yml (encrypted with ansible-vault)
+
+# Organization info
+org_name: "MyOrg"
+org_domain: "example.com"
+
+# System defaults
+timezone: "UTC"
+locale: "en_US.UTF-8"
+
+# Common packages for all environments
+common_packages:
+  - curl
+  - wget
+  - vim
+  - git
+  - htop
+  - jq
+  - unzip
+  - tree
+
+# Monitoring configuration
+monitoring_enabled: true
+monitoring_agent_service: "node_exporter"
+
+# Security defaults
+security_ssh_port: 22
+security_fail2ban_enabled: true
+
+# Log retention
+log_retention_days: 30
+
+# DNS servers (internal)
+dns_servers:
+  - 10.0.0.2
+  - 10.0.0.3

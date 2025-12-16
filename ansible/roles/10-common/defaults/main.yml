@@ -1,0 +1,29 @@
+---
+# common/defaults/main.yml - Default variables
+
+# Essential packages to install
+common_packages:
+  - curl
+  - wget
+  - vim
+  - git
+  - htop
+  - jq
+  - unzip
+
+# NTP service name varies by OS
+ntp_service: "{{ 'chronyd' if ansible_os_family == 'RedHat' else 'systemd-timesyncd' }}"
+
+# System limits
+nofile_soft: 65536
+nofile_hard: 65536
+nproc_soft: 65536
+nproc_hard: 65536
+
+# Whether to set hostname from inventory
+set_hostname: false
+
+# Sysctl parameters (optional, override in group_vars)
+# sysctl_params:
+#   net.core.somaxconn: 65535
+#   vm.swappiness: 10
