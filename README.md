@@ -8,7 +8,7 @@ Architecture patterns for IaC (Terraform, Ansible, CloudFormation) pipelines on 
 ┌─────────────────────────────────┐    ┌─────────────────────────────────┐
 │         NON-PROD ACCOUNT        │    │          PROD ACCOUNT           │
 │                                 │    │                                 │
-│  10-dev   20-qat   (sandbox)    │    │  40-stg   70-prod   90-dr       │
+│  10-dev   20-qat               │    │  40-stg   70-prod   90-dr       │
 │                                 │    │                                 │
 │  ca-central-1                   │    │  ca-central-1 / ca-west-1 (DR)  │
 └─────────────────────────────────┘    └─────────────────────────────────┘
