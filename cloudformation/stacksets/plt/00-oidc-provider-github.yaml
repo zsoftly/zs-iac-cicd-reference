@@ -1,0 +1,69 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  GitHub Actions OIDC Provider - PLT OU StackSet
+
+  Deploy via StackSet targeting PLT OU from management account.
+  Creates the OIDC identity provider for GitHub Actions in PLT runner account.
+
+Parameters:
+  GitHubOrganization:
+    Type: String
+    Description: GitHub organization name (e.g., zsoftly)
+    AllowedPattern: '^[a-zA-Z0-9-]+$'
+    ConstraintDescription: Must be a valid GitHub organization name
+
+  ThumbprintList:
+    Type: CommaDelimitedList
+    Description: GitHub OIDC thumbprints (rarely changes)
+    Default: '6938fd4d98bab03faadb97b34396831e3780aea1,1c58a3a8518e8759bf075b76b750d4f2df264fcd'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: GitHub Configuration
+        Parameters:
+          - GitHubOrganization
+          - ThumbprintList
+    ParameterLabels:
+      GitHubOrganization:
+        default: GitHub Organization
+
+Resources:
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList: !Ref ThumbprintList
+      Tags:
+        - Key: Name
+          Value: github-actions-oidc
+        - Key: Purpose
+          Value: cicd-authentication
+        - Key: OU
+          Value: PLT
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+Outputs:
+  OIDCProviderArn:
+    Description: ARN of the GitHub OIDC Provider
+    Value: !GetAtt GitHubOIDCProvider.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-OIDCProviderArn'
+
+  OIDCProviderUrl:
+    Description: URL of the OIDC Provider
+    Value: https://token.actions.githubusercontent.com
+    Export:
+      Name: !Sub '${AWS::StackName}-OIDCProviderUrl'
+
+  GitHubOrganization:
+    Description: Configured GitHub organization
+    Value: !Ref GitHubOrganization
+    Export:
+      Name: !Sub '${AWS::StackName}-GitHubOrganization'

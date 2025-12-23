@@ -123,3 +123,109 @@ pipeline {
   }
 }
 ```
+
+## Caching Strategy
+
+Jenkins lacks native caching, so use workspace persistence or S3:
+
+### Workspace Cache
+
+```groovy
+pipeline {
+    agent any
+
+    environment {
+        TF_PLUGIN_CACHE_DIR = "${WORKSPACE}/.terraform-cache"
+        ANSIBLE_COLLECTIONS_PATH = "${WORKSPACE}/.ansible-collections"
+    }
+
+    stages {
+        stage('Setup Cache Dirs') {
+            steps {
+                sh '''
+                    mkdir -p ${TF_PLUGIN_CACHE_DIR}
+                    mkdir -p ${ANSIBLE_COLLECTIONS_PATH}
+                '''
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                sh 'terraform init'
+            }
+        }
+    }
+}
+```
+
+### S3 Backend Cache (Recommended)
+
+For persistent caching across builds and agents:
+
+```groovy
+pipeline {
+    agent any
+
+    environment {
+        ARTIFACT_BUCKET = 'your-org-cicd-artifacts-123456789012-ca-central-1'
+        TF_PLUGIN_CACHE_DIR = "${HOME}/.terraform.d/plugin-cache"
+    }
+
+    stages {
+        stage('Restore Cache') {
+            steps {
+                sh '''
+                    CACHE_KEY="terraform-$(sha256sum .terraform.lock.hcl | cut -d' ' -f1)"
+                    mkdir -p ${TF_PLUGIN_CACHE_DIR}
+                    aws s3 cp "s3://${ARTIFACT_BUCKET}/${CACHE_KEY}.tar.gz" /tmp/cache.tar.gz || true
+                    if [[ -f /tmp/cache.tar.gz ]]; then
+                        tar -xzf /tmp/cache.tar.gz -C ~/.terraform.d/
+                    fi
+                '''
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                sh 'terraform init'
+            }
+        }
+
+        stage('Save Cache') {
+            steps {
+                sh '''
+                    CACHE_KEY="terraform-$(sha256sum .terraform.lock.hcl | cut -d' ' -f1)"
+                    tar -czf /tmp/cache.tar.gz -C ~/.terraform.d/ plugin-cache/ 2>/dev/null || true
+                    aws s3 cp /tmp/cache.tar.gz "s3://${ARTIFACT_BUCKET}/${CACHE_KEY}.tar.gz" || true
+                '''
+            }
+        }
+    }
+}
+```
+
+### Shared Library for Cache
+
+```groovy
+// vars/terraformCache.groovy
+def download(String artifactBucket) {
+    sh """
+        CACHE_KEY="terraform-\$(sha256sum .terraform.lock.hcl | cut -d' ' -f1)"
+        aws s3 cp "s3://${artifactBucket}/\${CACHE_KEY}.tar.gz" /tmp/cache.tar.gz || true
+        if [[ -f /tmp/cache.tar.gz ]]; then
+            mkdir -p ~/.terraform.d/plugin-cache
+            tar -xzf /tmp/cache.tar.gz -C ~/.terraform.d/
+        fi
+    """
+}
+
+def upload(String artifactBucket) {
+    sh """
+        CACHE_KEY="terraform-\$(sha256sum .terraform.lock.hcl | cut -d' ' -f1)"
+        tar -czf /tmp/cache.tar.gz -C ~/.terraform.d/ plugin-cache/ 2>/dev/null || true
+        aws s3 cp /tmp/cache.tar.gz "s3://${artifactBucket}/\${CACHE_KEY}.tar.gz" || true
+    """
+}
+```
+
+See [docs/caching.md](../docs/caching.md) for complete details.
