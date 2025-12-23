@@ -1,0 +1,235 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  CI/CD Deploy Role - WKL OU StackSet
+
+  Deploy via StackSet targeting WKL OU from management account.
+  Creates deploy role in each WKL account that trusts the PLT runner role.
+
+  Architecture:
+    PLT Account: cicd-runner-role (assumes this role)
+    WKL Accounts: cicd-deploy-role (this template)
+
+  Role Chaining Flow:
+    GitHub Actions -> OIDC -> cicd-runner-role (PLT) -> cicd-deploy-role (WKL) -> Deploy
+
+  Automatic Onboarding:
+    When new accounts are added to WKL OU, StackSet auto-deploys this role.
+
+Parameters:
+  RunnerAccountId:
+    Type: String
+    Description: AWS Account ID of the PLT runner account
+    AllowedPattern: '^\d{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account ID
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Cross-Account Configuration
+        Parameters:
+          - RunnerAccountId
+
+Resources:
+  # ==========================================================================
+  # DEPLOY ROLE - Full permissions for CI/CD operations
+  # ==========================================================================
+  CICDDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cicd-deploy-role
+      Description: |
+        WKL deploy role for CI/CD operations (Terraform, Ansible).
+        Assumed by cicd-runner-role from PLT account.
+        Has full permissions for infrastructure management.
+      MaxSessionDuration: 7200  # 2 hours
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allow PLT runner role to assume this role
+          - Sid: AssumeFromPLTRunner
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${RunnerAccountId}:role/cicd-runner-role'
+            Action: sts:AssumeRole
+          # Allow PLT EC2 runner role to assume this role
+          - Sid: AssumeFromPLTEC2Runner
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${RunnerAccountId}:role/cicd-runner-ec2-role'
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref CICDDeployPolicy
+      Tags:
+        - Key: Name
+          Value: cicd-deploy-role
+        - Key: Purpose
+          Value: infrastructure-deploy
+        - Key: OU
+          Value: WKL
+        - Key: TrustedBy
+          Value: !Sub 'PLT:${RunnerAccountId}'
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+  CICDDeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: cicd-deploy-policy
+      Description: Full infrastructure permissions for Terraform and Ansible
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Full EC2 access
+          - Sid: EC2Full
+            Effect: Allow
+            Action: ec2:*
+            Resource: '*'
+          # Full VPC access
+          - Sid: VPCFull
+            Effect: Allow
+            Action:
+              - ec2:CreateVpc
+              - ec2:DeleteVpc
+              - ec2:ModifyVpcAttribute
+              - ec2:CreateSubnet
+              - ec2:DeleteSubnet
+              - ec2:CreateRouteTable
+              - ec2:DeleteRouteTable
+              - ec2:CreateRoute
+              - ec2:DeleteRoute
+              - ec2:AssociateRouteTable
+              - ec2:DisassociateRouteTable
+              - ec2:CreateInternetGateway
+              - ec2:DeleteInternetGateway
+              - ec2:AttachInternetGateway
+              - ec2:DetachInternetGateway
+              - ec2:CreateNatGateway
+              - ec2:DeleteNatGateway
+              - ec2:AllocateAddress
+              - ec2:ReleaseAddress
+              - ec2:CreateSecurityGroup
+              - ec2:DeleteSecurityGroup
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupEgress
+            Resource: '*'
+          # Full IAM access (with guardrails)
+          - Sid: IAMFull
+            Effect: Allow
+            Action: iam:*
+            Resource: '*'
+          # Deny modifying foundation resources
+          - Sid: DenyModifyFoundation
+            Effect: Deny
+            Action:
+              - iam:DeleteRole
+              - iam:DeleteRolePolicy
+              - iam:DetachRolePolicy
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+            Resource:
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/cicd-*'
+            Condition:
+              StringEquals:
+                'iam:ResourceTag/Foundation': 'true'
+          # S3 full access
+          - Sid: S3Full
+            Effect: Allow
+            Action: s3:*
+            Resource: '*'
+          # RDS full access
+          - Sid: RDSFull
+            Effect: Allow
+            Action: rds:*
+            Resource: '*'
+          # EKS full access
+          - Sid: EKSFull
+            Effect: Allow
+            Action: eks:*
+            Resource: '*'
+          # Lambda full access
+          - Sid: LambdaFull
+            Effect: Allow
+            Action: lambda:*
+            Resource: '*'
+          # CloudWatch full access
+          - Sid: CloudWatchFull
+            Effect: Allow
+            Action:
+              - cloudwatch:*
+              - logs:*
+            Resource: '*'
+          # Secrets Manager
+          - Sid: SecretsManagerFull
+            Effect: Allow
+            Action: secretsmanager:*
+            Resource: '*'
+          # SSM (for Ansible)
+          - Sid: SSMFull
+            Effect: Allow
+            Action: ssm:*
+            Resource: '*'
+          # DynamoDB (for state locking)
+          - Sid: DynamoDBFull
+            Effect: Allow
+            Action: dynamodb:*
+            Resource: '*'
+          # Route53
+          - Sid: Route53Full
+            Effect: Allow
+            Action:
+              - route53:*
+              - route53domains:*
+            Resource: '*'
+          # ACM
+          - Sid: ACMFull
+            Effect: Allow
+            Action: acm:*
+            Resource: '*'
+          # ELB
+          - Sid: ELBFull
+            Effect: Allow
+            Action: elasticloadbalancing:*
+            Resource: '*'
+          # Auto Scaling
+          - Sid: AutoScalingFull
+            Effect: Allow
+            Action: autoscaling:*
+            Resource: '*'
+          # SNS/SQS
+          - Sid: MessagingFull
+            Effect: Allow
+            Action:
+              - sns:*
+              - sqs:*
+            Resource: '*'
+          # KMS
+          - Sid: KMSFull
+            Effect: Allow
+            Action: kms:*
+            Resource: '*'
+          # CloudFormation (for reading outputs)
+          - Sid: CloudFormationRead
+            Effect: Allow
+            Action:
+              - cloudformation:Describe*
+              - cloudformation:Get*
+              - cloudformation:List*
+            Resource: '*'
+
+Outputs:
+  DeployRoleArn:
+    Description: ARN of the Deploy Role (assumed by PLT runner)
+    Value: !GetAtt CICDDeployRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DeployRoleArn'
+
+  TrustedRunnerAccount:
+    Description: PLT account ID that can assume this role
+    Value: !Ref RunnerAccountId
+    Export:
+      Name: !Sub '${AWS::StackName}-TrustedRunnerAccount'

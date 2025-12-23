@@ -1,60 +1,67 @@
 # Authentication
 
-Role chaining pattern for CI/CD pipelines on AWS.
+Cross-account role chaining pattern for CI/CD pipelines on AWS.
 
-## AWS Account Model
+## OU Model
 
-| Account  | Environments  | Roles                           |
-| -------- | ------------- | ------------------------------- |
-| Non-Prod | dev, qat      | cicd-oidc-role, cicd-admin-role |
-| Prod     | stg, prod, dr | cicd-oidc-role, cicd-admin-role |
+| OU      | Account(s)    | Roles            |
+| ------- | ------------- | ---------------- |
+| PLT     | PLT-Runner    | cicd-runner-role |
+| WKL-NPD | SBX, DEV, QAT | cicd-deploy-role |
+| WKL-PRD | STG, PRD, DR  | cicd-deploy-role |
 
-Each account has its own set of roles. Pipeline assumes role in target account.
+Runner in PLT assumes deploy roles in WKL accounts.
 
 ## Pattern
 
 ```mermaid
 flowchart LR
-    A[CI/CD Runner] --> B[Auth Role<br/>minimal perms]
-    B --> C[Admin Role<br/>target account]
-    C --> D[Deploy]
+    A[CI/CD Platform] --> B[OIDC Provider]
+    B --> C[cicd-runner-role<br/>PLT Account]
+    C --> D[cicd-deploy-role<br/>WKL Account]
+    D --> E[Deploy]
 ```
 
-## Why Role Chaining?
+## Why Cross-Account Role Chaining?
 
-| Benefit       | Description                                                |
-| ------------- | ---------------------------------------------------------- |
-| Separation    | Auth role handles identity, admin role handles permissions |
-| Auditability  | Single admin role per account to review                    |
-| Flexibility   | Multiple auth methods share same admin role                |
-| Cross-account | Same pattern works for both accounts                       |
+| Benefit             | Description                                         |
+| ------------------- | --------------------------------------------------- |
+| **Isolation**       | Runner has no infra permissions, only assume role   |
+| **Blast Radius**    | Compromise of one WKL account doesn't affect others |
+| **Auto-Onboarding** | New WKL accounts automatically get deploy roles     |
+| **Auditability**    | Single deploy role per WKL account to review        |
+| **Zero Secrets**    | OIDC tokens, no stored credentials                  |
 
-## Roles (per account)
+## Roles
 
-| Role               | Purpose                   | Permissions             |
-| ------------------ | ------------------------- | ----------------------- |
-| `cicd-oidc-role`   | OIDC auth (GitHub/GitLab) | `sts:AssumeRole` only   |
-| `cicd-runner-role` | EC2 instance profile      | `sts:AssumeRole` only   |
-| `cicd-admin-role`  | Infrastructure operations | Full deploy permissions |
+| Role               | OU  | Purpose                   | Permissions             |
+| ------------------ | --- | ------------------------- | ----------------------- |
+| `cicd-runner-role` | PLT | OIDC auth + cross-account | `sts:AssumeRole` to WKL |
+| `cicd-deploy-role` | WKL | Infrastructure operations | Full deploy permissions |
 
 ## Auth Methods
 
 | Method             | Use Case                       | Secrets Stored |
 | ------------------ | ------------------------------ | -------------- |
 | OIDC + Role Chain  | GitHub Actions, GitLab Premium | None           |
-| IMDv2 + Role Chain | Self-hosted EC2 runners        | None           |
+| IMDv2 + Role Chain | Self-hosted EC2 runners in PLT | None           |
 
 ## Platform Config
 
 ### GitHub Actions
 
 ```yaml
-# Role ARNs are not sensitive - hardcode in workflow or use variables
+# Role ARNs in PLT account
 env:
-  OIDC_ROLE_ARN_NONPROD: arn:aws:iam::111111111111:role/cicd-oidc-role
-  OIDC_ROLE_ARN_PROD: arn:aws:iam::222222222222:role/cicd-oidc-role
-  ADMIN_ROLE_ARN_NONPROD: arn:aws:iam::111111111111:role/cicd-admin-role
-  ADMIN_ROLE_ARN_PROD: arn:aws:iam::222222222222:role/cicd-admin-role
+  RUNNER_ROLE_ARN: arn:aws:iam::111111111111:role/cicd-runner-role
+
+  # WKL account deploy roles
+  DEPLOY_ROLE_SBX: arn:aws:iam::222222222222:role/cicd-deploy-role
+  DEPLOY_ROLE_DEV: arn:aws:iam::333333333333:role/cicd-deploy-role
+  DEPLOY_ROLE_QAT: arn:aws:iam::444444444444:role/cicd-deploy-role
+  DEPLOY_ROLE_STG: arn:aws:iam::555555555555:role/cicd-deploy-role
+  DEPLOY_ROLE_PRD: arn:aws:iam::666666666666:role/cicd-deploy-role
+  DEPLOY_ROLE_DR: arn:aws:iam::777777777777:role/cicd-deploy-role
 
 permissions:
   id-token: write
@@ -64,25 +71,55 @@ permissions:
 ### GitLab CI
 
 ```yaml
-# Variables (per environment) - not secrets, role ARNs are public
+# Variables (per environment)
 variables:
-  OIDC_ROLE_ARN: arn:aws:iam::${AWS_ACCOUNT_ID}:role/cicd-oidc-role
-  ADMIN_ROLE_ARN: arn:aws:iam::${AWS_ACCOUNT_ID}:role/cicd-admin-role
+  RUNNER_ROLE_ARN: arn:aws:iam::${PLT_ACCOUNT_ID}:role/cicd-runner-role
+  DEPLOY_ROLE_ARN: arn:aws:iam::${WKL_ACCOUNT_ID}:role/cicd-deploy-role
 ```
 
 ## Cross-Account Flow
 
 ```
-Deploy to Non-Prod (dev, qat):
-  Runner → Non-Prod OIDC Role → Non-Prod Admin Role → Deploy
+Deploy to WKL-NPD (sbx, dev, qat):
+  GitHub → OIDC → PLT Runner Role → WKL-NPD Deploy Role → Deploy
 
-Deploy to Prod (stg, prod, dr):
-  Runner → Prod OIDC Role → Prod Admin Role → Deploy
+Deploy to WKL-PRD (stg, prod, dr):
+  GitHub → OIDC → PLT Runner Role → WKL-PRD Deploy Role → Deploy
+```
+
+## Trust Policies
+
+**Runner Role (PLT OU):**
+
+```yaml
+AssumeRolePolicyDocument:
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+      Action: sts:AssumeRoleWithWebIdentity
+      Condition:
+        StringEquals:
+          token.actions.githubusercontent.com:aud: sts.amazonaws.com
+        StringLike:
+          token.actions.githubusercontent.com:sub: repo:org/*:*
+```
+
+**Deploy Role (WKL OU):**
+
+```yaml
+AssumeRolePolicyDocument:
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: arn:aws:iam::PLT_ACCOUNT_ID:role/cicd-runner-role
+      Action: sts:AssumeRole
 ```
 
 ## Security
 
 - Use OIDC (zero stored secrets)
-- Separate roles per account
+- Runner role in PLT, deploy roles in WKL
 - Restrict OIDC trust to specific repos
 - Short session durations (1-2 hours)
+- Deploy roles trust only the runner role ARN

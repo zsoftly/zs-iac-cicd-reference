@@ -1,0 +1,375 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  Terraform State Backend - WKL OU StackSet
+
+  Deploy via StackSet targeting WKL OU from management account.
+  Creates S3 bucket and DynamoDB table for Terraform state in each WKL account.
+
+  Resources created (per account/region):
+  - S3 bucket with versioning, encryption, and lifecycle
+  - DynamoDB table for state locking with TTL
+  - KMS key for encryption (optional)
+
+  Automatic Onboarding:
+    When new accounts are added to WKL OU, StackSet auto-deploys state backend.
+
+Parameters:
+  OrganizationPrefix:
+    Type: String
+    Description: Organization prefix for naming (e.g., zsoftly, acme)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Lowercase alphanumeric and hyphens only
+    MaxLength: 20
+
+  RunnerAccountId:
+    Type: String
+    Description: AWS Account ID of the PLT runner account (for cross-account state access)
+    AllowedPattern: '^\d{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account ID
+
+  RetentionDays:
+    Type: Number
+    Description: Days to retain non-current state versions
+    Default: 90
+    MinValue: 30
+    MaxValue: 365
+
+  EnableKMSEncryption:
+    Type: String
+    Description: Use customer-managed KMS key (true) or S3-managed encryption (false)
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Default: 'false'
+
+  LockTableTTLHours:
+    Type: Number
+    Description: Hours before stale locks auto-expire
+    Default: 24
+    MinValue: 1
+    MaxValue: 168
+
+Conditions:
+  UseKMS: !Equals [!Ref EnableKMSEncryption, 'true']
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - OrganizationPrefix
+      - Label:
+          default: Cross-Account
+        Parameters:
+          - RunnerAccountId
+      - Label:
+          default: Encryption
+        Parameters:
+          - EnableKMSEncryption
+      - Label:
+          default: Retention & Cleanup
+        Parameters:
+          - RetentionDays
+          - LockTableTTLHours
+
+Resources:
+  # ==========================================================================
+  # KMS Key (Optional)
+  # ==========================================================================
+  StateEncryptionKey:
+    Type: AWS::KMS::Key
+    Condition: UseKMS
+    Properties:
+      Description: !Sub 'Terraform state encryption key - ${OrganizationPrefix}'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RootAccountAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: CICDDeployRoleAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/cicd-deploy-role'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${OrganizationPrefix}-tfstate-key'
+        - Key: Purpose
+          Value: terraform-state-encryption
+        - Key: OU
+          Value: WKL
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+  StateEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: UseKMS
+    Properties:
+      AliasName: !Sub 'alias/${OrganizationPrefix}-tfstate'
+      TargetKeyId: !Ref StateEncryptionKey
+
+  # ==========================================================================
+  # S3 Bucket for Terraform State
+  # ==========================================================================
+  TerraformStateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${OrganizationPrefix}-tfstate-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: !If
+                - UseKMS
+                - 'aws:kms'
+                - AES256
+              KMSMasterKeyID: !If
+                - UseKMS
+                - !GetAtt StateEncryptionKey.Arn
+                - !Ref AWS::NoValue
+            BucketKeyEnabled: !If [UseKMS, true, !Ref AWS::NoValue]
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref RetentionDays
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: TransitionToIntelligentTiering
+            Status: Enabled
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 30
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+        LogFilePrefix: !Sub 'tfstate-${AWS::Region}/'
+      Tags:
+        - Key: Name
+          Value: !Sub 'tfstate-${OrganizationPrefix}-${AWS::Region}'
+        - Key: Purpose
+          Value: terraform-state
+        - Key: OU
+          Value: WKL
+        - Key: Region
+          Value: !Ref AWS::Region
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+  TerraformStateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TerraformStateBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RequireHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+              - !Sub '${TerraformStateBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+          # Allow local deploy role
+          - Sid: AllowLocalDeployRole
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/cicd-deploy-role'
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:GetBucketVersioning
+              - s3:GetBucketLocation
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+              - !Sub '${TerraformStateBucket.Arn}/*'
+
+  # ==========================================================================
+  # Access Logs Bucket
+  # ==========================================================================
+  AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${OrganizationPrefix}-tfstate-logs-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 30
+      Tags:
+        - Key: Name
+          Value: !Sub 'tfstate-logs-${OrganizationPrefix}-${AWS::Region}'
+        - Key: Purpose
+          Value: access-logs
+        - Key: OU
+          Value: WKL
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+  AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AccessLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3ServerAccessLogsPolicy
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${AccessLogsBucket.Arn}/*'
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !GetAtt TerraformStateBucket.Arn
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+  # ==========================================================================
+  # DynamoDB Table for State Locking
+  # ==========================================================================
+  TerraformLockTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${OrganizationPrefix}-tfstate-lock'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: LockID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: LockID
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ExpirationTime
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !If
+          - UseKMS
+          - !Ref StateEncryptionKey
+          - alias/aws/dynamodb
+      Tags:
+        - Key: Name
+          Value: !Sub 'terraform-lock-${OrganizationPrefix}'
+        - Key: Purpose
+          Value: terraform-state-locking
+        - Key: OU
+          Value: WKL
+        - Key: TTLHours
+          Value: !Ref LockTableTTLHours
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+Outputs:
+  StateBucketName:
+    Description: Name of the Terraform state bucket
+    Value: !Ref TerraformStateBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-StateBucketName'
+
+  StateBucketArn:
+    Description: ARN of the Terraform state bucket
+    Value: !GetAtt TerraformStateBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-StateBucketArn'
+
+  LockTableName:
+    Description: Name of the DynamoDB lock table
+    Value: !Ref TerraformLockTable
+    Export:
+      Name: !Sub '${AWS::StackName}-LockTableName'
+
+  LockTableArn:
+    Description: ARN of the DynamoDB lock table
+    Value: !GetAtt TerraformLockTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LockTableArn'
+
+  KMSKeyArn:
+    Description: ARN of the KMS encryption key (if enabled)
+    Condition: UseKMS
+    Value: !GetAtt StateEncryptionKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-KMSKeyArn'
+
+  Region:
+    Description: AWS Region where resources are deployed
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Sub '${AWS::StackName}-Region'
+
+  BackendConfig:
+    Description: Terraform backend configuration snippet
+    Value: !Sub |
+      terraform {
+        backend "s3" {
+          bucket         = "${TerraformStateBucket}"
+          key            = "<ENV>/terraform.tfstate"
+          region         = "${AWS::Region}"
+          dynamodb_table = "${TerraformLockTable}"
+          encrypt        = true
+        }
+      }

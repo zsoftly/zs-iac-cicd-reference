@@ -1,0 +1,300 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  CI/CD Artifact & Cache Bucket - PLT OU StackSet
+
+  Deploy via StackSet targeting PLT OU from management account.
+  Creates shared artifact bucket for caching dependencies and storing pipeline artifacts.
+
+  Purpose:
+  - Cache Terraform providers (30-60s -> 2-5s)
+  - Cache Ansible collections (20-40s -> 1-3s)
+  - Cache package dependencies (pip, npm, go)
+  - Store Terraform plan artifacts between jobs
+
+  Security:
+  - Short TTLs ensure security patches are applied (3-7 days)
+  - Hash-based cache keys limit blast radius
+  - Automatic cleanup prevents unbounded growth
+
+Parameters:
+  OrganizationPrefix:
+    Type: String
+    Description: Organization prefix for naming (e.g., zsoftly, acme)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Lowercase alphanumeric and hyphens only
+    MaxLength: 20
+
+  ProviderCacheTTL:
+    Type: Number
+    Description: Days to retain Terraform provider cache (recommend 7 for security patches)
+    Default: 7
+    MinValue: 1
+    MaxValue: 30
+
+  DependencyCacheTTL:
+    Type: Number
+    Description: Days to retain dependency caches (pip, npm, ansible)
+    Default: 3
+    MinValue: 1
+    MaxValue: 14
+
+  PlanArtifactTTL:
+    Type: Number
+    Description: Days to retain Terraform plan artifacts
+    Default: 1
+    MinValue: 1
+    MaxValue: 7
+
+  EnableVersioning:
+    Type: String
+    Description: Enable versioning for artifact recovery
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Default: 'false'
+
+Conditions:
+  EnableVersioning: !Equals [!Ref EnableVersioning, 'true']
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - OrganizationPrefix
+      - Label:
+          default: Cache Expiration (Security vs Speed)
+        Parameters:
+          - ProviderCacheTTL
+          - DependencyCacheTTL
+          - PlanArtifactTTL
+      - Label:
+          default: Optional Features
+        Parameters:
+          - EnableVersioning
+
+Resources:
+  # ==========================================================================
+  # Artifact & Cache Bucket
+  # ==========================================================================
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub '${OrganizationPrefix}-cicd-artifacts-${AWS::AccountId}-${AWS::Region}'
+      # Encryption
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Versioning (optional - cache doesn't usually need it)
+      VersioningConfiguration:
+        Status: !If [EnableVersioning, Enabled, Suspended]
+      # Block public access
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Object ownership
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      # Lifecycle rules for cache expiration
+      LifecycleConfiguration:
+        Rules:
+          # Terraform providers - 7 days default
+          - Id: ExpireTerraformProviders
+            Status: Enabled
+            Prefix: terraform-providers/
+            ExpirationInDays: !Ref ProviderCacheTTL
+
+          # Terraform plugins - same as providers
+          - Id: ExpireTerraformPlugins
+            Status: Enabled
+            Prefix: terraform-plugins/
+            ExpirationInDays: !Ref ProviderCacheTTL
+
+          # Ansible collections - 3 days default
+          - Id: ExpireAnsibleCollections
+            Status: Enabled
+            Prefix: ansible-collections/
+            ExpirationInDays: !Ref DependencyCacheTTL
+
+          # Python pip cache - 3 days default
+          - Id: ExpirePipCache
+            Status: Enabled
+            Prefix: pip-cache/
+            ExpirationInDays: !Ref DependencyCacheTTL
+
+          # Node modules - 3 days default
+          - Id: ExpireNodeModules
+            Status: Enabled
+            Prefix: node-modules/
+            ExpirationInDays: !Ref DependencyCacheTTL
+
+          # Go modules - 7 days (more stable)
+          - Id: ExpireGoModules
+            Status: Enabled
+            Prefix: go-mod/
+            ExpirationInDays: !Ref ProviderCacheTTL
+
+          # Generic dependencies
+          - Id: ExpireDependencies
+            Status: Enabled
+            Prefix: dependencies/
+            ExpirationInDays: !Ref DependencyCacheTTL
+
+          # Container layers - 1 day (security critical)
+          - Id: ExpireContainerLayers
+            Status: Enabled
+            Prefix: docker-layers/
+            ExpirationInDays: 1
+
+          # Terraform plans - 1 day (job-specific)
+          - Id: ExpireTerraformPlans
+            Status: Enabled
+            Prefix: terraform-plans/
+            ExpirationInDays: !Ref PlanArtifactTTL
+
+          # Build artifacts - 1 day
+          - Id: ExpireBuildArtifacts
+            Status: Enabled
+            Prefix: build-artifacts/
+            ExpirationInDays: !Ref PlanArtifactTTL
+
+          # Clean up incomplete multipart uploads
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+          # Intelligent tiering for long-lived objects
+          - Id: IntelligentTiering
+            Status: Enabled
+            Prefix: archives/
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 1
+
+      # Intelligent tiering configuration
+      IntelligentTieringConfigurations:
+        - Id: CacheOptimization
+          Status: Enabled
+          Tierings:
+            - AccessTier: ARCHIVE_ACCESS
+              Days: 90
+            - AccessTier: DEEP_ARCHIVE_ACCESS
+              Days: 180
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${OrganizationPrefix}-cicd-artifacts'
+        - Key: Purpose
+          Value: cicd-artifact-cache
+        - Key: OU
+          Value: PLT
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+  # Bucket policy
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Require HTTPS
+          - Sid: RequireHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub '${ArtifactBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+          # Allow runner role full access
+          - Sid: AllowRunnerRole
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/cicd-runner-role'
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub '${ArtifactBucket.Arn}/*'
+
+          # Allow EC2 runner role
+          - Sid: AllowEC2RunnerRole
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/cicd-runner-ec2-role'
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub '${ArtifactBucket.Arn}/*'
+
+Outputs:
+  ArtifactBucketName:
+    Description: Name of the artifact bucket
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ArtifactBucketName'
+
+  ArtifactBucketArn:
+    Description: ARN of the artifact bucket
+    Value: !GetAtt ArtifactBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ArtifactBucketArn'
+
+  ArtifactBucketDomainName:
+    Description: Domain name of the artifact bucket
+    Value: !GetAtt ArtifactBucket.RegionalDomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-ArtifactBucketDomainName'
+
+  CacheKeyPrefix:
+    Description: Example cache key prefixes
+    Value: |
+      terraform-providers/{lock-hash}/
+      terraform-plugins/{os}-{arch}/
+      ansible-collections/{requirements-hash}/
+      pip-cache/{requirements-hash}/
+      node-modules/{lockfile-hash}/
+      go-mod/{go-sum-hash}/
+      terraform-plans/{run-id}/
+
+  UsageExample:
+    Description: Example usage in CI/CD pipeline
+    Value: !Sub |
+      # Set artifact bucket environment variable
+      export ARTIFACT_BUCKET="${ArtifactBucket}"
+
+      # Download Terraform provider cache
+      CACHE_KEY="terraform-providers-$(sha256sum .terraform.lock.hcl | cut -d' ' -f1)"
+      aws s3 cp "s3://${ArtifactBucket}/$CACHE_KEY.tar.gz" /tmp/cache.tar.gz || true
+      if [[ -f /tmp/cache.tar.gz ]]; then
+        mkdir -p ~/.terraform.d/plugin-cache
+        tar -xzf /tmp/cache.tar.gz -C ~/.terraform.d/
+      fi
+
+      # After terraform init, upload cache
+      tar -czf /tmp/cache.tar.gz -C ~/.terraform.d/ plugin-cache/
+      aws s3 cp /tmp/cache.tar.gz "s3://${ArtifactBucket}/$CACHE_KEY.tar.gz"

@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  CI/CD Runner Role - PLT OU StackSet
+
+  Deploy via StackSet targeting PLT OU from management account.
+  Creates the runner role that assumes deploy roles in WKL accounts.
+
+  Architecture:
+    PLT Account: cicd-runner-role (OIDC auth, assume WKL deploy roles)
+    WKL Accounts: cicd-deploy-role (trusts PLT runner role)
+
+  Role Chaining Flow:
+    GitHub Actions -> OIDC -> cicd-runner-role (PLT) -> cicd-deploy-role (WKL) -> Deploy
+
+Parameters:
+  GitHubOrganization:
+    Type: String
+    Description: GitHub organization name
+    AllowedPattern: '^[a-zA-Z0-9-]+$'
+
+  AllowedRepositories:
+    Type: String
+    Description: |
+      Repository pattern for trust policy.
+      Examples: my-repo, infra-*, * (all repos)
+    Default: '*'
+
+  AllowedBranches:
+    Type: String
+    Description: |
+      Branch pattern for deployments.
+      Examples: main, release-*, refs/heads/main
+    Default: '*'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: GitHub Configuration
+        Parameters:
+          - GitHubOrganization
+          - AllowedRepositories
+          - AllowedBranches
+
+Resources:
+  # ==========================================================================
+  # RUNNER ROLE - Authenticates via OIDC, assumes WKL deploy roles
+  # ==========================================================================
+  CICDRunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cicd-runner-role
+      Description: |
+        PLT runner role. Authenticates via OIDC.
+        Only permission: assume cicd-deploy-role in WKL accounts.
+      MaxSessionDuration: 3600  # 1 hour
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubActionsOIDC
+            Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                'token.actions.githubusercontent.com:sub': !Sub 'repo:${GitHubOrganization}/${AllowedRepositories}:*'
+      Policies:
+        - PolicyName: AssumeWKLDeployRoles
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Assume deploy roles in any WKL account
+              - Sid: AssumeDeployRoles
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: 'arn:aws:iam::*:role/cicd-deploy-role'
+      Tags:
+        - Key: Name
+          Value: cicd-runner-role
+        - Key: Purpose
+          Value: cicd-runner
+        - Key: OU
+          Value: PLT
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+  # ==========================================================================
+  # EC2 RUNNER ROLE - For self-hosted runners in PLT account
+  # ==========================================================================
+  CICDRunnerEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cicd-runner-ec2-role
+      Description: |
+        Instance profile role for self-hosted CI/CD runners in PLT.
+        Allows assuming cicd-deploy-role in WKL accounts.
+      MaxSessionDuration: 7200
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EC2AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AssumeWKLDeployRoles
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AssumeDeployRoles
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: 'arn:aws:iam::*:role/cicd-deploy-role'
+      Tags:
+        - Key: Name
+          Value: cicd-runner-ec2-role
+        - Key: Purpose
+          Value: ec2-runner-profile
+        - Key: OU
+          Value: PLT
+        - Key: ManagedBy
+          Value: cloudformation-stackset
+        - Key: Foundation
+          Value: 'true'
+
+  CICDRunnerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: cicd-runner-profile
+      Roles:
+        - !Ref CICDRunnerEC2Role
+
+Outputs:
+  RunnerRoleArn:
+    Description: ARN of the Runner Role (use this in GitHub Actions)
+    Value: !GetAtt CICDRunnerRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RunnerRoleArn'
+
+  RunnerEC2RoleArn:
+    Description: ARN of the EC2 Runner Role
+    Value: !GetAtt CICDRunnerEC2Role.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RunnerEC2RoleArn'
+
+  RunnerInstanceProfileArn:
+    Description: ARN of the EC2 Runner Instance Profile
+    Value: !GetAtt CICDRunnerInstanceProfile.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RunnerInstanceProfileArn'
+
+  RoleChainingExample:
+    Description: Example GitHub Actions configuration
+    Value: !Sub |
+      # GitHub Actions workflow example:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${CICDRunnerRole.Arn}
+          aws-region: ca-central-1
+
+      - name: Assume WKL deploy role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::WKL_ACCOUNT_ID:role/cicd-deploy-role
+          aws-region: ca-central-1
+          role-chaining: true
